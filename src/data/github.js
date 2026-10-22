@@ -1,4 +1,4 @@
-import { utf8ToB64, b64ToUtf8 } from "../lib/json.js";
+import { b64ToUtf8 } from "../lib/json.js";
 
 // Client minimal de l'API GitHub pour le dépôt de données.
 // Erreurs typées : kind = "token" | "conflict" | "offline" | "rate" | "http"
@@ -36,8 +36,6 @@ export function createGitHub({ owner, repo, branch = "main", getToken, fetchImpl
     throw new GitHubError("http", res.status, msg || "Erreur GitHub " + res.status);
   }
 
-  const encPath = p => p.split("/").map(encodeURIComponent).join("/");
-
   return {
     // Arbre complet du dépôt. Avec l'ETag précédent, GitHub répond 304 sans consommer de quota.
     async getTree(etag) {
@@ -50,20 +48,30 @@ export function createGitHub({ owner, repo, branch = "main", getToken, fetchImpl
       const r = await call("GET", "/git/blobs/" + sha);
       return b64ToUtf8(r.json.content);
     },
-    // Fichier courant (null s'il n'existe pas).
-    async getFile(path) {
+    // Tête de la branche : { commit, tree }.
+    async getHead() {
+      const r = await call("GET", "/git/ref/heads/" + encodeURIComponent(branch));
+      const commit = r.json.object.sha;
+      const c = await call("GET", "/git/commits/" + commit);
+      return { commit, tree: c.json.tree.sha };
+    },
+    // Contenu d'un arbre précis : Map chemin -> sha du fichier.
+    async getTreeMap(treeSha) {
+      const r = await call("GET", "/git/trees/" + treeSha + "?recursive=1");
+      return new Map((r.json.tree || []).filter(e => e.type === "blob").map(e => [e.path, e.sha]));
+    },
+    // Écrit plusieurs fichiers en UN commit au-dessus de `head`.
+    // Si la branche a bougé entre-temps, GitHub refuse (pas d'avance rapide) : erreur "conflict", à relire et refaire.
+    async commitFiles(head, files, message) {
+      const t = await call("POST", "/git/trees", { body: { base_tree: head.tree, tree: files.map(f => ({ path: f.path, mode: "100644", type: "blob", content: f.text })) } });
+      const c = await call("POST", "/git/commits", { body: { message, tree: t.json.sha, parents: [head.commit] } });
       try {
-        const r = await call("GET", "/contents/" + encPath(path) + "?ref=" + encodeURIComponent(branch));
-        return { sha: r.json.sha, text: b64ToUtf8(r.json.content) };
+        await call("PATCH", "/git/refs/heads/" + encodeURIComponent(branch), { body: { sha: c.json.sha, force: false } });
       } catch (e) {
-        if (e.kind === "http" && e.status === 404) return null;
+        if (e.kind === "http" && e.status === 422) throw new GitHubError("conflict", 422, e.message);
         throw e;
       }
-    },
-    // Crée ou met à jour un fichier. sha = version attendue (null pour une création). Renvoie le nouveau sha.
-    async putFile(path, text, sha, message) {
-      const r = await call("PUT", "/contents/" + encPath(path), { body: { message, content: utf8ToB64(text), branch, ...(sha ? { sha } : {}) } });
-      return r.json.content.sha;
+      return c.json.sha;
     },
     async checkAccess() {
       const r = await call("GET", "");

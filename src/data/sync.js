@@ -1,32 +1,64 @@
-import { stableStringify, deepEqual } from "../lib/json.js";
+import { stableStringify, deepEqual, gitBlobSha } from "../lib/json.js";
 import { merge3 } from "./merge.js";
 
 // Fichiers du dépôt suivis par l'app.
 export const TRACKED = /^data\/(ratings|sessions|requests)\/[^/]+\.json$|^data\/meta\/tags\.json$/;
 
 const clone = v => v === undefined ? undefined : JSON.parse(JSON.stringify(v));
+const idOf = path => path.replace(/^.*\//, "").replace(/\.json$/, "");
 
-function commitMessage(path) {
-  const m = path.match(/^data\/(\w+)\/(.+)\.json$/);
-  if (!m) return "Sillon : " + path;
-  const kind = { ratings: "titre", sessions: "composition", meta: "mots-clés", requests: "demande" }[m[1]] || m[1];
-  return "Sillon (app) : " + kind + " " + m[2];
+/* ---- Message de commit : un résumé lisible du lot (aussi pour Claude) ---- */
+const FIELD = { note: "note", comment: "commentaire", tags: "mots-clés", heart: "coup de cœur", offtopic: "hors sujet", moment: "moment fort", bpm: "tempo", fresh: "note sans l'usure", spUri: "lien Spotify", verified: "", spUrl: "", spAlbum: "", spMs: "" };
+const IGNORE = new Set(["updatedAt", "ratedAt", "session"]);
+function describe(rec) {
+  const d = rec.data || {}, b = rec.base || {};
+  const id = idOf(rec.path);
+  if (rec.path.startsWith("data/ratings/")) {
+    const name = (d.artist || "?") + " – " + (d.song || id);
+    if (!rec.base) return { line: name + " : ajouté", short: name };
+    const out = [];
+    if (b.note !== d.note) out.push(d.note == null ? "note retirée" : "note " + (typeof b.note === "number" ? b.note + " → " : "") + d.note);
+    Object.keys({ ...b, ...d }).forEach(k => {
+      if (k === "note" || IGNORE.has(k) || deepEqual(b[k], d[k])) return;
+      const label = k in FIELD ? FIELD[k] : k;
+      if (label && !out.includes(label)) out.push(label);
+    });
+    return { line: name + (out.length ? " : " + out.join(", ") : ""), short: name + (b.note !== d.note && d.note != null ? " (" + d.note + ")" : "") };
+  }
+  if (rec.path.startsWith("data/sessions/")) return { line: "composition " + id + (rec.base ? "" : " : créée"), short: "composition " + id };
+  if (rec.path.startsWith("data/requests/")) return { line: "demande Explorer " + id + (rec.base ? "" : " : envoyée"), short: "demande Explorer" };
+  return { line: "mots-clés personnalisés", short: "mots-clés" };
+}
+export function commitMessage(recs) {
+  const items = recs.map(describe);
+  const tracks = recs.filter(r => r.path.startsWith("data/ratings/")).length;
+  let title;
+  if (recs.length === 1) title = items[0].short;
+  else {
+    const parts = [];
+    if (tracks) parts.push(tracks + " titre" + (tracks > 1 ? "s" : ""));
+    recs.forEach((r, i) => { if (!r.path.startsWith("data/ratings/") && !parts.includes(items[i].short)) parts.push(items[i].short); });
+    title = parts.join(", ");
+  }
+  return "Sillon (app) : " + title + (recs.length > 1 || items[0].line !== items[0].short ? "\n\n" + items.map(i => "- " + i.line).join("\n") : "");
 }
 
 /*
   Moteur de synchronisation IndexedDB <-> dépôt GitHub.
-  - set() écrit tout de suite en local, puis pousse après `debounceMs` sans nouvelle modif.
-  - Les écritures partent une par une, avec le sha attendu. Conflit : relecture, fusion champ par champ, nouvel essai.
+  - set() écrit tout de suite en local (IndexedDB). Les modifs en attente partent ensemble, en UN commit :
+    `debounceMs` après la dernière modif, au plus tard `maxWaitMs` après la première, ou tout de suite avec flush().
+  - Avant d'écrire, l'app relit la tête de la branche : un fichier changé côté dépôt est fusionné champ par champ.
+    Si la branche bouge pendant l'écriture (pas d'avance rapide), on relit et on recommence.
   - pull() lit l'arbre du dépôt avec ETag (304 = rien à faire) et ne télécharge que les fichiers dont le sha a changé.
   - Toutes les opérations réseau passent par une seule file : jamais de lecture pendant une écriture.
 */
-export function createSync({ api, store, debounceMs = 3000, hasToken = () => true, timers = globalThis, log = () => {} }) {
+export function createSync({ api, store, debounceMs = 15000, maxWaitMs = 120000, hasToken = () => true, timers = globalThis, now = () => Date.now(), log = () => {} }) {
   const files = new Map();
   const listeners = new Set();
-  const recentWrites = new Map(); // path -> sha remplacé par notre écriture (ignore un arbre en retard)
+  const recentWrites = new Map(); // path -> sha remplacé par notre commit (ignore un arbre en retard)
   let state = { status: "loading", message: "", pending: 0, lastSync: null };
   let chain = Promise.resolve();
-  let flushTimer = null, retryTimer = null;
+  let flushTimer = null, retryTimer = null, firstDirtyAt = null;
   let ready = false;
 
   const pendingCount = () => [...files.values()].filter(r => r.dirty).length;
@@ -54,6 +86,7 @@ export function createSync({ api, store, debounceMs = 3000, hasToken = () => tru
     all.forEach(r => files.set(r.path, r));
     ready = true;
     state = { ...state, lastSync: (await store.getMeta("lastSync")) || null };
+    if (pendingCount()) schedule();
     settle();
   }
 
@@ -71,52 +104,62 @@ export function createSync({ api, store, debounceMs = 3000, hasToken = () => tru
     schedule();
   }
 
-  function schedule(delay = debounceMs) {
+  // Prochain envoi : après `debounceMs` de calme, sans dépasser `maxWaitMs` depuis la première modif en attente.
+  function schedule() {
+    if (firstDirtyAt == null) firstDirtyAt = now();
+    const delay = Math.max(0, Math.min(debounceMs, firstDirtyAt + maxWaitMs - now()));
     timers.clearTimeout(flushTimer);
     flushTimer = timers.setTimeout(() => flush(), delay);
   }
 
-  async function pushOne(path) {
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const rec = files.get(path);
-      if (!rec || !rec.dirty) return;
-      const rev = rec.rev;
-      const text = stableStringify(rec.data);
-      const written = JSON.parse(text);
-      try {
-        const newSha = await api.putFile(path, text, rec.sha, commitMessage(path));
-        if (rec.sha) recentWrites.set(path, rec.sha);
-        const cur = files.get(path);
-        const done = { ...cur, base: written, sha: newSha, dirty: cur.rev !== rev };
-        files.set(path, done);
-        await save(done);
-        emit();
-        return;
-      } catch (e) {
-        if (e.kind !== "conflict") throw e;
-        // Le fichier a changé côté dépôt : on relit, on fusionne, on réessaie.
-        const remote = await api.getFile(path);
-        const cur = files.get(path);
-        if (!remote) { const n = { ...cur, sha: null }; files.set(path, n); await save(n); continue; }
-        const rdata = JSON.parse(remote.text);
-        const merged = merge3(cur.base, cur.data, rdata);
-        const n = { ...cur, data: merged, base: rdata, sha: remote.sha };
-        files.set(path, n);
-        await save(n);
-        emit();
+  // Envoie toutes les modifs en attente en un seul commit.
+  async function pushAll() {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (!pendingCount()) return;
+      const head = await api.getHead();
+      const remote = await api.getTreeMap(head.tree);
+      // 1. Fusion avec ce qui a changé côté dépôt depuis notre dernière lecture
+      for (const rec of [...files.values()].filter(r => r.dirty)) {
+        const rsha = remote.get(rec.path);
+        if (rsha && rsha !== rec.sha) {
+          let rdata;
+          try { rdata = JSON.parse(await api.getBlob(rsha)); } catch (e) { if (e && e.kind) throw e; continue; }
+          const cur = files.get(rec.path);
+          const n = { ...cur, data: merge3(cur.base, cur.data, rdata), base: rdata, sha: rsha };
+          files.set(rec.path, n); await save(n); emit();
+        } else if (!rsha && rec.sha) {
+          const n = { ...files.get(rec.path), sha: null, base: null }; // supprimé côté dépôt : on le recrée
+          files.set(rec.path, n); await save(n);
+        }
       }
+      // 2. Un commit pour tout le lot
+      const batch = [...files.values()].filter(r => r.dirty).map(r => ({ path: r.path, rev: r.rev, text: stableStringify(r.data), rec: r }));
+      try {
+        await api.commitFiles(head, batch.map(b => ({ path: b.path, text: b.text })), commitMessage(batch.map(b => b.rec)));
+      } catch (e) {
+        if (e && e.kind === "conflict") continue; // la branche a bougé : on relit et on recommence
+        throw e;
+      }
+      // 3. Le dépôt contient maintenant exactement ce qu'on a écrit
+      for (const b of batch) {
+        const sha = await gitBlobSha(b.text);
+        const cur = files.get(b.path);
+        if (cur.sha) recentWrites.set(b.path, cur.sha);
+        const done = { ...cur, base: JSON.parse(b.text), sha, dirty: cur.rev !== b.rev };
+        files.set(b.path, done); await save(done);
+      }
+      firstDirtyAt = pendingCount() ? now() : null;
+      emit();
+      return;
     }
-    throw Object.assign(new Error("Conflit persistant sur " + path), { kind: "http" });
+    throw Object.assign(new Error("La branche change trop vite, nouvel essai plus tard"), { kind: "http" });
   }
 
   function flush() {
     timers.clearTimeout(flushTimer);
     if (!hasToken()) { settle(); return Promise.resolve(); }
     return enqueue(async () => {
-      try {
-        for (const rec of [...files.values()]) if (rec.dirty) await pushOne(rec.path);
-        settle();
-      } catch (e) { fail(e); }
+      try { await pushAll(); settle(); } catch (e) { fail(e); }
     });
   }
 
@@ -149,31 +192,30 @@ export function createSync({ api, store, debounceMs = 3000, hasToken = () => tru
           }
           // Fichiers supprimés du dépôt
           for (const rec of [...files.values()]) {
-            if (remote.has(rec.path) || !rec.sha) continue;
-            if (recentWrites.has(rec.path)) continue;
+            if (remote.has(rec.path) || !rec.sha || recentWrites.has(rec.path)) continue;
             if (rec.dirty) { const n = { ...rec, sha: null, base: null }; files.set(rec.path, n); await save(n); }
             else { files.delete(rec.path); await store.del(rec.path); }
           }
           recentWrites.clear();
           await store.setMeta("treeEtag", tree.etag);
         }
-        const now = new Date().toISOString();
-        await store.setMeta("lastSync", now);
-        state = { ...state, lastSync: now };
-        // Modifs locales en attente (ex. faites hors ligne) : on les pousse maintenant.
-        for (const rec of [...files.values()]) if (rec.dirty) await pushOne(rec.path);
+        const t = new Date().toISOString();
+        await store.setMeta("lastSync", t);
+        state = { ...state, lastSync: t };
+        emit();
         settle();
       } catch (e) { fail(e); }
     });
   }
 
-  // Mise en route : sync au démarrage, toutes les `intervalMs`, au retour du réseau et quand l'onglet revient au premier plan.
+  // Mise en route : lecture au démarrage, toutes les `intervalMs`, au retour du réseau et au retour au premier plan.
+  // Les modifs en attente partent quand l'onglet passe en arrière-plan.
   function start({ intervalMs = 60000, win = globalThis.window } = {}) {
     pull();
     const iv = timers.setInterval(() => { if (!win || !win.navigator || win.navigator.onLine !== false) pull(); }, intervalMs);
-    const onOnline = () => pull();
+    const onOnline = () => { pull(); if (pendingCount()) flush(); };
     const onOffline = () => setStatus("offline");
-    const onVisible = () => { if (win.document.visibilityState === "visible") pull(); };
+    const onVisible = () => { if (win.document.visibilityState === "visible") pull(); else if (pendingCount()) flush(); };
     if (win && win.addEventListener) {
       win.addEventListener("online", onOnline);
       win.addEventListener("offline", onOffline);

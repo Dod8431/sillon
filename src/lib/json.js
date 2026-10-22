@@ -13,6 +13,16 @@ export const stableStringify = v => JSON.stringify(sortDeep(v), null, 2) + "\n";
 
 export const deepEqual = (a, b) => JSON.stringify(sortDeep(a)) === JSON.stringify(sortDeep(b));
 
+// Sha git d'un fichier texte (sha1 de "blob <taille>\0<contenu>"), identique à celui de GitHub.
+export async function gitBlobSha(text) {
+  const body = new TextEncoder().encode(text);
+  const head = new TextEncoder().encode("blob " + body.length + "\0");
+  const all = new Uint8Array(head.length + body.length);
+  all.set(head); all.set(body, head.length);
+  const d = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-1", all));
+  return Array.from(d, b => b.toString(16).padStart(2, "0")).join("");
+}
+
 // Base64 <-> texte UTF-8 (l'API GitHub transporte le contenu en base64).
 export function utf8ToB64(str) {
   const bytes = new TextEncoder().encode(str);

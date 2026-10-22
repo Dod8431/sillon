@@ -1,14 +1,20 @@
+import { createHash } from "node:crypto";
 import { GitHubError } from "../src/data/github.js";
 
+const blobSha = text => { const b = Buffer.from(text, "utf8"); return createHash("sha1").update("blob " + b.length + "\0").update(b).digest("hex"); };
+
 // Faux dépôt GitHub en mémoire, avec le même contrat que createGitHub().
+// Chaque commit (de l'app ou "externe") fait avancer la branche ; les vrais sha git sont utilisés.
 export function fakeGitHub(initial = {}) {
-  let n = 0;
-  const newSha = () => "sha" + (++n);
-  const files = new Map();
-  let version = 0;
-  const calls = { tree: 0, tree304: 0, blob: 0, put: 0, getFile: 0 };
-  let offline = false, badToken = false;
-  for (const [p, data] of Object.entries(initial)) files.set(p, { text: typeof data === "string" ? data : JSON.stringify(data, null, 2) + "\n", sha: newSha() });
+  const files = new Map(); // path -> { text, sha }
+  const blobs = new Map(); // sha -> text
+  const commits = [];      // { id, message, paths }
+  let head = "c0";
+  const calls = { tree: 0, tree304: 0, blob: 0, commit: 0, head: 0 };
+  let offline = false, badToken = false, beforeRefUpdate = null;
+  const put = (path, text) => { const sha = blobSha(text); files.set(path, { text, sha }); blobs.set(sha, text); };
+  const advance = (message, paths) => { head = "c" + (commits.length + 1); commits.push({ id: head, message, paths }); };
+  for (const [p, data] of Object.entries(initial)) put(p, typeof data === "string" ? data : JSON.stringify(data, null, 2) + "\n");
   const guard = () => {
     if (offline) throw new GitHubError("offline", 0, "offline");
     if (badToken) throw new GitHubError("token", 401, "Bad credentials");
@@ -16,51 +22,52 @@ export function fakeGitHub(initial = {}) {
   const api = {
     async getTree(etag) {
       guard(); calls.tree++;
-      if (etag === "v" + version) { calls.tree304++; return { notModified: true }; }
-      return { etag: "v" + version, files: [...files].map(([path, f]) => ({ path, sha: f.sha })) };
+      if (etag === head) { calls.tree304++; return { notModified: true }; }
+      return { etag: head, files: [...files].map(([path, f]) => ({ path, sha: f.sha })) };
     },
     async getBlob(sha) {
       guard(); calls.blob++;
-      for (const f of files.values()) if (f.sha === sha) return f.text;
-      throw new GitHubError("http", 404, "blob");
+      if (!blobs.has(sha)) throw new GitHubError("http", 404, "blob");
+      return blobs.get(sha);
     },
-    async getFile(path) {
-      guard(); calls.getFile++;
-      const f = files.get(path);
-      return f ? { sha: f.sha, text: f.text } : null;
-    },
-    async putFile(path, text, sha) {
-      guard(); calls.put++;
-      const f = files.get(path);
-      if (f && f.sha !== sha) throw new GitHubError("conflict", sha ? 409 : 422, "sha mismatch");
-      if (!f && sha) throw new GitHubError("conflict", 409, "file gone");
-      const s = newSha();
-      files.set(path, { text, sha: s });
-      version++;
-      return s;
+    async getHead() { guard(); calls.head++; return { commit: head, tree: "t-" + head }; },
+    async getTreeMap() { guard(); return new Map([...files].map(([p, f]) => [p, f.sha])); },
+    async commitFiles(h, list, message) {
+      guard();
+      if (beforeRefUpdate) { const fn = beforeRefUpdate; beforeRefUpdate = null; fn(); }
+      if (h.commit !== head) throw new GitHubError("conflict", 422, "Update is not a fast forward");
+      calls.commit++;
+      list.forEach(f => put(f.path, f.text));
+      advance(message, list.map(f => f.path));
+      return head;
     },
   };
   return {
-    api, files, calls,
-    // Simule un commit externe (Claude qui pousse dans le dépôt).
-    commit(path, data) { files.set(path, { text: JSON.stringify(data, null, 2) + "\n", sha: newSha() }); version++; },
-    remove(path) { files.delete(path); version++; },
+    api, files, calls, commits,
+    // Commit externe (Claude qui pousse dans le dépôt).
+    commit(path, data) { put(path, JSON.stringify(data, null, 2) + "\n"); advance("externe", [path]); },
+    remove(path) { files.delete(path); advance("suppression", [path]); },
     read(path) { const f = files.get(path); return f ? JSON.parse(f.text) : undefined; },
     setOffline(v) { offline = v; },
     setBadToken(v) { badToken = v; },
+    // Simule un push concurrent juste avant que l'app ne déplace la branche.
+    raceOnce(fn) { beforeRefUpdate = fn; },
   };
 }
 
-// Minuteurs pilotés à la main.
+// Minuteurs pilotés à la main, avec une horloge simulée.
 export function manualTimers() {
-  let id = 0;
+  let id = 0, t = 0;
   const pending = new Map();
   return {
+    now: () => t,
+    advance(ms) { t += ms; },
     setTimeout(fn, ms) { const i = ++id; pending.set(i, { fn, ms }); return i; },
     clearTimeout(i) { pending.delete(i); },
     setInterval() { return ++id; },
     clearInterval() {},
-    async runAll() { const list = [...pending.values()]; pending.clear(); for (const t of list) await t.fn(); },
+    async runAll() { const list = [...pending.values()]; pending.clear(); for (const x of list) await x.fn(); },
+    delays() { return [...pending.values()].map(x => x.ms); },
     get count() { return pending.size; },
   };
 }

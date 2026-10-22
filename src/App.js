@@ -83,9 +83,7 @@ export function App({ sync, gh, ghToken, store, spRedirect }) {
     const unsub = sync.subscribe(st => { setSyncState(st); if (!raf) raf = requestAnimationFrame(refresh); });
     refresh();
     const stop = sync.start();
-    const onHide = () => { if (document.visibilityState === "hidden") sync.flush(); };
-    document.addEventListener("visibilitychange", onHide);
-    return () => { unsub(); stop(); document.removeEventListener("visibilitychange", onHide); cancelAnimationFrame(raf); };
+    return () => { unsub(); stop(); cancelAnimationFrame(raf); };
   }, [sync]);
 
   useEffect(() => {
@@ -278,8 +276,8 @@ export function App({ sync, gh, ghToken, store, spRedirect }) {
     if (!q.length) { toast("Rien à écouter pour l'instant"); return; }
     setDeck({ queue: q, i: 0 });
   }, [active, toast]);
-  // Fermer la platine relève le bras : la lecture s'arrête.
-  const closeDeck = useCallback(() => { setDeck(null); setSeen(new Set()); if (pbRef.current) pbRef.current.pause().catch(() => {}); }, []);
+  // Fermer la platine relève le bras : la lecture s'arrête et les notes de la séance partent en un commit.
+  const closeDeck = useCallback(() => { setDeck(null); setSeen(new Set()); if (pbRef.current) pbRef.current.pause().catch(() => {}); sync.flush(); }, [sync]);
   useEffect(() => { document.body.style.overflow = deck || press ? "hidden" : ""; }, [deck, press]);
   const exploreFrom = useCallback(d => { setExploreSeed(slug(d.artist + " " + d.song)); setDeck(null); setView("explorer"); }, [setView]);
 

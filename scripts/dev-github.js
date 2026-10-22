@@ -22,6 +22,8 @@ function walk(root, dir = root, out = []) {
 export function devGitHub(repoDir) {
   const prefix = "/__gh/repos/";
   const bySha = new Map(); // cache sha -> chemin
+  const pendingTrees = new Map(), pendingCommits = new Map();
+  let seq = 0;
   const send = (res, status, body, headers = {}) => {
     res.statusCode = status;
     Object.entries({ "Content-Type": "application/json", ...headers }).forEach(([k, v]) => res.setHeader(k, v));
@@ -51,25 +53,36 @@ export function devGitHub(repoDir) {
             if (!p) return send(res, 404, { message: "Not Found" });
             return send(res, 200, { sha, content: readFileSync(join(repoDir, p)).toString("base64"), encoding: "base64" });
           }
-          if (rest.startsWith("contents/")) {
-            const path = decodeURIComponent(rest.slice("contents/".length));
-            const abs = join(repoDir, path);
-            const cur = existsSync(abs) ? readFileSync(abs) : null;
-            if (req.method === "GET") {
-              if (!cur) return send(res, 404, { message: "Not Found" });
-              return send(res, 200, { sha: blobSha(cur), content: cur.toString("base64") });
-            }
-            if (req.method === "PUT") {
-              const body = await readBody(req);
-              if (cur && body.sha !== blobSha(cur)) return send(res, body.sha ? 409 : 422, { message: body.sha ? "sha does not match" : "\"sha\" wasn't supplied." });
-              if (!cur && body.sha) return send(res, 409, { message: "sha does not match (file missing)" });
-              const buf = Buffer.from(body.content, "base64");
+          // API git (commit groupé) : tête de branche, arbre, commit, déplacement de la branche.
+          const headSha = () => execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoDir }).toString().trim();
+          if (req.method === "GET" && rest.startsWith("git/ref/heads/")) return send(res, 200, { object: { sha: headSha() } });
+          if (req.method === "GET" && rest.startsWith("git/commits/")) return send(res, 200, { tree: { sha: "tree-" + rest.slice("git/commits/".length) } });
+          if (req.method === "POST" && rest === "git/trees") {
+            const body = await readBody(req);
+            const id = "pt" + (++seq);
+            pendingTrees.set(id, body.tree || []);
+            return send(res, 201, { sha: id });
+          }
+          if (req.method === "POST" && rest === "git/commits") {
+            const body = await readBody(req);
+            const id = "pc" + (++seq);
+            pendingCommits.set(id, { tree: body.tree, message: body.message, parent: (body.parents || [])[0] });
+            return send(res, 201, { sha: id });
+          }
+          if (req.method === "PATCH" && rest.startsWith("git/refs/heads/")) {
+            const body = await readBody(req);
+            const c = pendingCommits.get(body.sha);
+            if (!c) return send(res, 422, { message: "Object does not exist" });
+            if (c.parent !== headSha()) return send(res, 422, { message: "Update is not a fast forward" });
+            const entries = pendingTrees.get(c.tree) || [];
+            for (const e of entries) {
+              const abs = join(repoDir, e.path);
               mkdirSync(dirname(abs), { recursive: true });
-              writeFileSync(abs, buf);
-              execFileSync("git", ["add", path], { cwd: repoDir });
-              execFileSync("git", ["commit", "-q", "-m", body.message || "dev"], { cwd: repoDir });
-              return send(res, cur ? 200 : 201, { content: { sha: blobSha(buf), path } });
+              writeFileSync(abs, e.content);
+              execFileSync("git", ["add", e.path], { cwd: repoDir });
             }
+            execFileSync("git", ["commit", "-q", "-m", c.message || "dev"], { cwd: repoDir });
+            return send(res, 200, { object: { sha: headSha() } });
           }
           return send(res, 404, { message: "Route non simulée : " + req.method + " " + rest });
         } catch (e) {
