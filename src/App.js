@@ -8,7 +8,8 @@ import { ViewExplorer } from "./explorer.js";
 import { ViewReglages, syncLabel } from "./settings.js";
 import { Deck, PressOverlay } from "./deck.js";
 import * as SP from "./spotify/api.js";
-import { login as spLoginRedirect, logout as spLogoutLocal, hasSession, isConfigured } from "./spotify/auth.js";
+import { login as spLoginRedirect, logout as spLogoutLocal, hasSession, isConfigured, hasScope, getAccessToken } from "./spotify/auth.js";
+import { createPlayback } from "./spotify/playback.js";
 import { pressPlaylist as runPress } from "./press.js";
 import { CONFIG } from "./config.js";
 
@@ -146,7 +147,30 @@ export function App({ sync, gh, ghToken, store, spRedirect }) {
   }, [gh, sync]);
   const resetLocal = useCallback(async () => { await store.clear(); window.location.reload(); }, [store]);
   const spLogin = useCallback(() => { spLoginRedirect().catch(e => toast(e.message)); }, [toast]);
-  const spLogout = useCallback(() => { spLogoutLocal(); setSpOn(false); toast("Spotify déconnecté"); }, [toast]);
+  const spLogout = useCallback(() => {
+    if (pbRef.current) { pbRef.current.disconnect(); pbRef.current = null; setPb(null); }
+    spLogoutLocal(); setSpOn(false); toast("Spotify déconnecté");
+  }, [toast]);
+
+  /* ---- lecture depuis le vinyle (phase 2) ---- */
+  const pbRef = useRef(null);
+  const [pb, setPb] = useState(null);
+  const getPb = useCallback(() => {
+    if (!spOn) return null;
+    if (!pbRef.current) pbRef.current = createPlayback({ api: SP, getToken: () => getAccessToken(), hasStreaming: () => hasScope("streaming"), name: "Sillon", onChange: s => setPb(s) });
+    return pbRef.current;
+  }, [spOn]);
+  const pbInit = useCallback(() => { const c = getPb(); if (c) c.init(); }, [getPb]);
+  // Lit (ou met en pause) le titre. Renvoie false si la lecture dans l'app n'est pas possible.
+  const playTrack = useCallback(d => {
+    const c = getPb();
+    if (!c || !d || !d.spUri) return false;
+    c.activate(); // pendant le clic : débloque l'audio (mobile)
+    c.play(d.spUri).then(r => {
+      if (!r.ok) toast("Aucun appareil Spotify disponible : ouvre Spotify quelque part, ou utilise le lien Spotify ↗");
+    }, e => toast(e && e.kind === "premium" ? "La lecture demande Spotify Premium." : spFail(e)));
+    return true;
+  }, [getPb, toast]);
 
   /* ---- dérivés ---- */
   const sessionList = useMemo(() => {
@@ -254,7 +278,8 @@ export function App({ sync, gh, ghToken, store, spRedirect }) {
     if (!q.length) { toast("Rien à écouter pour l'instant"); return; }
     setDeck({ queue: q, i: 0 });
   }, [active, toast]);
-  const closeDeck = useCallback(() => { setDeck(null); setSeen(new Set()); }, []);
+  // Fermer la platine relève le bras : la lecture s'arrête.
+  const closeDeck = useCallback(() => { setDeck(null); setSeen(new Set()); if (pbRef.current) pbRef.current.pause().catch(() => {}); }, []);
   useEffect(() => { document.body.style.overflow = deck || press ? "hidden" : ""; }, [deck, press]);
   const exploreFrom = useCallback(d => { setExploreSeed(slug(d.artist + " " + d.song)); setDeck(null); setView("explorer"); }, [setView]);
 
@@ -264,6 +289,7 @@ export function App({ sync, gh, ghToken, store, spRedirect }) {
     spOn, spUser, spConfigured: isConfigured(), spLogin, spLogout, pressPlaylist, press, closePress, nowPlaying, np, exportData, genreOfDoc, resolveOne: resolveDoc,
     deck, setDeck, openDeck, closeDeck, exploreFrom, exploreSeed,
     syncState, syncNow, hasGhToken, setGhToken, testGh, resetLocal,
+    pb, pbCtl: pbRef.current, pbInit, playTrack, spStreaming: spOn && hasScope("streaming"),
   };
   const cur = sessionsFull[active] || DEFAULT_SESSION;
   const sd = docsBySession[active] || [];

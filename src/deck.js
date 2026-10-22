@@ -1,12 +1,39 @@
 import { useState, useEffect, useRef, useMemo, useCallback, useContext, createContext, Fragment, h, Ctx, useApp, slug, norm, GENRES, uniq, ALL_QUALS, FLAGS, NEW_TAGS, G, CONTEXTS, DIRECTIONS, LEGACY, DEFAULT_SESSION, catNo, SAVE_KEYS, VIEWS, LS, spLink, mean, fmt, isRated, inPlaylist, sessionOf, hue, discStyle, lvl, segColor, fmtMin, qualList, isFlag, batchOf, batchNum, batchLabel, batchLong, normalizeDoc, initialView, tagImpact } from "./core.js";
 import { Disc, initials, Rec, Cover, Sleeve, useVizSim, reduceMotion, cssVar, VizStrip, VizRing, energyOf, Turntable, Links, TagMini, VU, TextField, TagPad, TrackCard } from "./components.js";
 
+/* ============ Barre de lecture (Spotify dans l'app ou sur un appareil) ============ */
+function PlayBar({ d }) {
+  const app = useApp();
+  const s = app.pb, ctl = app.pbCtl;
+  const [, tick] = useState(0);
+  useEffect(() => { const iv = setInterval(() => tick(x => x + 1), 500); return () => clearInterval(iv); }, []);
+  useEffect(() => {
+    if (s.mode !== "connect") return;
+    const go = () => ctl.refresh().catch(() => {});
+    go();
+    const iv = setInterval(go, 5000);
+    return () => clearInterval(iv);
+  }, [s.mode, s.uri]);
+  const dur = s.duration || Number(d.spMs) || 0;
+  const pos = Math.min(dur || Infinity, ctl.positionNow());
+  const seek = e => { if (!dur) return; const r = e.currentTarget.getBoundingClientRect(); ctl.seek(Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * dur).catch(() => {}); };
+  return h("div", { className: "playbar" },
+    h("button", { type: "button", className: "tap", onClick: () => app.playTrack(d) }, s.paused ? "▶ Lire" : "❚❚ Pause"),
+    h("span", { className: "mono t" }, fmtMin(pos)),
+    h("div", { className: "pbar", role: "slider", tabIndex: 0, "aria-label": "Position dans le morceau", "aria-valuemin": 0, "aria-valuemax": Math.round(dur / 1000), "aria-valuenow": Math.round(pos / 1000), onClick: seek,
+      onKeyDown: e => { if (e.key === "ArrowRight" || e.key === "ArrowLeft") { e.preventDefault(); e.stopPropagation(); ctl.seek(Math.max(0, pos + (e.key === "ArrowRight" ? 10000 : -10000))).catch(() => {}); } } },
+      h("i", { style: { width: (dur ? Math.min(100, pos / dur * 100) : 0) + "%" } })),
+    h("span", { className: "mono t" }, dur ? fmtMin(dur) : "–:––"),
+    h("span", { className: "where" }, "♪ " + (s.mode === "sdk" ? "dans Sillon" : "sur " + (s.deviceName || "Spotify"))));
+}
+
 /* ============ Mode écoute ============ */
 export function Deck() {
   const app = useApp();
   const dk = app.deck;
   const [auto, setAuto] = useState(() => LS.get("sillon-auto", false));
   const [playing, setPlaying] = useState(null);
+  const prevUri = useRef(null);
   const boxRef = useRef(null);
   const platterRef = useRef(null);
   const taps = useRef([]);
@@ -49,7 +76,20 @@ export function Deck() {
     if (!app.spOn) return;
     [dk.queue[dk.i], dk.queue[dk.i + 1]].forEach(x => { if (x && app.docs[x] && !app.docs[x].spUrl) app.resolveOne(x).catch(() => {}); });
   }, [id, app.spOn]);
+  // Prépare le lecteur dès l'ouverture de la platine (le SDK met une seconde à se connecter).
+  useEffect(() => { if (app.spOn) app.pbInit(); }, [app.spOn]);
+  // Changement de titre pendant la lecture : on enchaîne sur le nouveau vinyle.
+  useEffect(() => {
+    const pb = app.pb, cur = d && d.spUri;
+    if (pb && !pb.paused && pb.uri && pb.uri === prevUri.current && cur && cur !== pb.uri) app.playTrack(d);
+    prevUri.current = cur || null;
+  }, [id]);
   if (!d) return null;
+  const pb = app.pb;
+  const inApp = app.spOn && d.spUri ? () => app.playTrack(d) : null;
+  const mine = !!(pb && d.spUri && pb.uri === d.spUri);
+  const isPlaying = inApp ? mine && !pb.paused : playing === id;
+  const hint = inApp ? (isPlaying ? "● Lecture " + (pb.mode === "sdk" ? "dans Sillon" : "sur " + (pb.deviceName || "Spotify")) : mine ? "En pause · P" : pb && pb.mode === "loading" ? "Préparation du lecteur…" : "Clique le vinyle · P") : null;
   return h("div", { className: "deck", onClick: e => { if (e.target === e.currentTarget) app.closeDeck(); } },
     h("div", { className: "deckbox", ref: boxRef, role: "dialog", "aria-modal": "true", "aria-label": "Platine" },
       h("div", { className: "dbar" },
@@ -60,7 +100,7 @@ export function Deck() {
         h("button", { type: "button", className: "btn sm ghost", onClick: app.closeDeck, "aria-label": "Fermer" }, "✕")),
       h("div", { className: "meter" }, h("i", { style: { width: (done / dk.queue.length * 100) + "%" } })),
       h("div", { className: "dstage" },
-        h(Turntable, { d, playing: playing === id, platterRef, onPlay: () => setPlaying(id), bpm: d.bpm }),
+        h(Turntable, { d, playing: isPlaying, platterRef, onPlay: () => setPlaying(id), bpm: d.bpm, inApp, hint }),
         h("div", { style: { minWidth: 0 } },
           h("div", { className: "row eyebrow" }, batchLong(batchOf(d)) + (d.group ? " · " + d.group : ""), typeof d.prono === "number" && d.prono >= 9 && !isRated(d) ? h("span", { className: "badge hot" }, "Pari fort") : null),
           h("div", { className: "ttl" }, d.song),
@@ -69,13 +109,15 @@ export function Deck() {
             h("span", { className: "bignum " + lvl(d.note), style: { fontSize: 64 } }, isRated(d) ? String(d.note) : "–"),
             h("button", { type: "button", className: "heart", "aria-pressed": d.heart ? "true" : "false", "aria-label": "Coup de cœur", onClick: () => app.updateDoc(id, { heart: !d.heart }) }, "♥"),
             isRated(d) ? h("button", { type: "button", className: "offbtn", "aria-pressed": d.offtopic ? "true" : "false", title: "Hors sujet (O)", onClick: () => app.updateDoc(id, { offtopic: !d.offtopic }) }, d.offtopic ? "Hors sujet ✓" : "Hors sujet") : null))),
-      h(VizStrip, { playing: playing === id, bpm: d.bpm, energy: energyOf(d) }),
+      h(VizStrip, { playing: isPlaying, bpm: d.bpm, energy: energyOf(d) }),
+      mine ? h(PlayBar, { d }) : null,
       h("div", { className: "vizbar" },
         h("button", { type: "button", className: "tap" + (tapHit ? " hit" : ""), onClick: tap }, "Tape le tempo · T"),
         d.bpm ? h("span", { className: "bpm" }, "♩ " + d.bpm + " BPM") : h("span", null, "tempo par défaut 118"),
-        h("span", null, playing === id ? "Le visualiseur danse sur ton tempo et l'énergie du morceau (Spotify ne partage pas le son)." : "Lance le vinyle pour réveiller le visualiseur.")),
+        h("span", null, isPlaying ? "Le visualiseur danse sur ton tempo et l'énergie du morceau (Spotify ne partage pas le son)." : "Lance le vinyle pour réveiller le visualiseur."),
+        app.spOn && pb && pb.error === "reauth" ? h("button", { type: "button", className: "linkbtn", onClick: app.spLogin }, "Reconnecte Spotify pour lire dans Sillon") : null),
       h(TrackCard, { key: id, id, mode: "deck", openTags: true }),
-      h("div", { className: "keys" }, h("span", null, h("kbd", null, "P"), " lancer sur Spotify"), h("span", null, h("kbd", null, "T"), " taper le tempo"), h("span", null, h("kbd", null, "1"), "–", h("kbd", null, "9"), " noter"), h("span", null, h("kbd", null, "0"), " = 10"), h("span", null, h("kbd", null, "H"), " coup de cœur"),
+      h("div", { className: "keys" }, h("span", null, h("kbd", null, "P"), inApp ? " lire / pause" : " lancer sur Spotify"), h("span", null, h("kbd", null, "T"), " taper le tempo"), h("span", null, h("kbd", null, "1"), "–", h("kbd", null, "9"), " noter"), h("span", null, h("kbd", null, "0"), " = 10"), h("span", null, h("kbd", null, "H"), " coup de cœur"),
         h("span", null, h("kbd", null, "←"), h("kbd", null, "→"), " naviguer"), h("span", null, h("kbd", null, "Échap"), " fermer"))));
 }
 

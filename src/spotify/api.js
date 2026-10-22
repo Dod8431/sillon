@@ -100,6 +100,15 @@ export async function replaceItems(id, uris) {
   for (let i = 100; i < uris.length; i += 100) await spFetch("/playlists/" + id + "/items", { method: "POST", body: { uris: uris.slice(i, i + 100) } });
 }
 
+/* ---- Lecture (Spotify Connect) ---- */
+const dev = deviceId => deviceId ? { device_id: deviceId } : undefined;
+export const startPlayback = (uris, deviceId) => spFetch("/me/player/play", { method: "PUT", query: dev(deviceId), body: { uris } });
+export const resumePlayback = deviceId => spFetch("/me/player/play", { method: "PUT", query: dev(deviceId) });
+export const pausePlayback = deviceId => spFetch("/me/player/pause", { method: "PUT", query: dev(deviceId) });
+export const seekPlayback = (ms, deviceId) => spFetch("/me/player/seek", { method: "PUT", query: { position_ms: String(Math.max(0, Math.round(ms))), ...(dev(deviceId) || {}) } });
+export const playerState = () => spFetch("/me/player");
+export const devices = async () => ((await spFetch("/me/player/devices")) || {}).devices || [];
+
 // Contenu réel de la playlist, pour vérifier que la liste est exacte.
 export async function playlistUris(id) {
   const out = [];

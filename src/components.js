@@ -112,14 +112,17 @@ export function VizRing({ playing, bpm, energy, color }) {
 }
 export const energyOf = d => { const t = d.tags || {}; let e = .82; if (t.energie > 0) e += .12; if (t.energie < 0) e -= .25; if (t.explosion > 0 || t.drop > 0) e += .1; if (t.lent) e -= .2; return Math.max(.35, Math.min(1, e)); };
 
-export function Turntable({ d, playing, onPlay, platterRef, bpm }) {
+// inApp : si fourni (titre relié à Spotify et compte connecté), le vinyle lit le titre au lieu d'ouvrir un lien.
+export function Turntable({ d, playing, onPlay, platterRef, bpm, inApp, hint }) {
   const arm = h("span", { className: "arm", "aria-hidden": "true" }, h("i", { className: "bar" }), h("i", { className: "hd" }), h("i", { className: "pv" }));
   const disc = h("span", { className: "disc" + (playing ? " spin" : ""), style: discStyle(d.artist) }, h("span", { className: "lbl" }, initials(d.artist)));
-  const platter = spLink(d)
-    ? h("a", { ref: platterRef, className: "platter", href: spLink(d), target: "sillon_spotify", onClick: onPlay, title: d.spUrl ? "Lancer sur Spotify" : "Chercher sur Spotify", "aria-label": "Lancer " + d.song + " sur Spotify" }, disc)
-    : h("span", { className: "platter", "aria-disabled": "true", title: "Recherche du morceau sur Spotify" }, disc);
+  const platter = inApp
+    ? h("button", { ref: platterRef, type: "button", className: "platter", onClick: inApp, title: playing ? "Pause" : "Lire le vinyle", "aria-label": (playing ? "Mettre en pause " : "Lire ") + d.song, "aria-pressed": playing ? "true" : "false" }, disc)
+    : spLink(d)
+      ? h("a", { ref: platterRef, className: "platter", href: spLink(d), target: "sillon_spotify", onClick: onPlay, title: d.spUrl ? "Lancer sur Spotify" : "Chercher sur Spotify", "aria-label": "Lancer " + d.song + " sur Spotify" }, disc)
+      : h("span", { className: "platter", "aria-disabled": "true", title: "Recherche du morceau sur Spotify" }, disc);
   return h("div", { className: "tt" + (playing ? " playing" : "") }, h(VizRing, { playing, bpm, energy: energyOf(d), color: "hsl(" + hue(d.artist) + " 70% 62%)" }), h("span", { className: "led", "aria-hidden": "true" }), platter, arm,
-    h("span", { className: "hint" }, spLink(d) ? (playing ? (d.spUrl ? "● Lancé sur Spotify" : "● Recherche ouverte sur Spotify") : (d.spUrl ? "Clique le vinyle · P" : "Clique le vinyle : recherche Spotify")) : ""));
+    h("span", { className: "hint" }, hint || (spLink(d) ? (playing ? (d.spUrl ? "● Lancé sur Spotify" : "● Recherche ouverte sur Spotify") : (d.spUrl ? "Clique le vinyle · P" : "Clique le vinyle : recherche Spotify")) : "")));
 }
 export function Links({ d, explore }) {
   const app = useApp();

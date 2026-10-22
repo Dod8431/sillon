@@ -5,6 +5,8 @@ export const SCOPES = [
   "playlist-modify-private", "playlist-modify-public", "playlist-read-private",
   "user-library-read", "user-library-modify",
   "user-read-currently-playing", "user-read-playback-state", "user-modify-playback-state",
+  // Web Playback SDK (lecture dans l'app)
+  "streaming", "user-read-email", "user-read-private",
 ];
 const KEY = "sillon-sp";
 const PKCE = "sillon-sp-pkce";
@@ -17,6 +19,8 @@ const write = v => { try { v ? localStorage.setItem(KEY, JSON.stringify(v)) : lo
 
 export const isConfigured = () => !!CONFIG.spotifyClientId;
 export const hasSession = () => !!(read() && read().refresh);
+// Scopes accordés lors de la connexion (une connexion faite avant la phase 2 n'a pas "streaming").
+export const hasScope = s => { const t = read(); return !!(t && String(t.scope || "").split(" ").includes(s)); };
 export function logout() { write(null); }
 
 export async function login() {
@@ -42,7 +46,8 @@ async function tokenRequest(params) {
   return json;
 }
 const store = (json, prevRefresh) => {
-  const v = { access: json.access_token, refresh: json.refresh_token || prevRefresh, expiresAt: Date.now() + (json.expires_in || 3600) * 1000, scope: json.scope };
+  const prev = read() || {};
+  const v = { access: json.access_token, refresh: json.refresh_token || prevRefresh, expiresAt: Date.now() + (json.expires_in || 3600) * 1000, scope: json.scope || prev.scope };
   write(v);
   return v;
 };

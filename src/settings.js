@@ -56,7 +56,14 @@ export function ViewReglages() {
       !app.spConfigured ? h("p", null, "Client ID Spotify absent de src/config.js : la connexion est désactivée.")
         : app.spOn ? h(Fragment, null,
           h("p", null, "Connecté" + (app.spUser ? " en tant que " + app.spUser : "") + ". Recherche, « ce qui passe » et pressage disponibles."),
-          h("div", { className: "row" }, h("button", { type: "button", className: "btn danger", onClick: app.spLogout }, "Se déconnecter")))
+          h("p", null, !app.spStreaming
+            ? "Lecture depuis le vinyle : reconnecte Spotify une fois pour autoriser la lecture dans Sillon (nouvelle permission « streaming »)."
+            : app.pb && app.pb.mode === "sdk" ? "Lecture depuis le vinyle : dans Sillon (appareil « Sillon » dans Spotify Connect)."
+            : app.pb && app.pb.mode === "connect" ? "Lecture depuis le vinyle : sur ton appareil Spotify actif" + (app.pb.error === "premium" ? " (la lecture dans le navigateur demande Premium)." : app.pb.error && app.pb.error.startsWith("init") ? " (ce navigateur ne peut pas lire Spotify lui-même)." : ".")
+            : "Lecture depuis le vinyle : dans Sillon, ou sur ton appareil Spotify actif si le navigateur ne peut pas lire."),
+          h("div", { className: "row" },
+            !app.spStreaming ? h("button", { type: "button", className: "btn primary", onClick: app.spLogin }, "Reconnecter Spotify") : null,
+            h("button", { type: "button", className: "btn danger", onClick: app.spLogout }, "Se déconnecter")))
         : h(Fragment, null,
           h("p", null, "Connecte ton compte pour retrouver les titres, voir ce qui passe et presser les playlists."),
           h("div", { className: "row" }, h("button", { type: "button", className: "btn primary", onClick: app.spLogin }, "Se connecter à Spotify")),
