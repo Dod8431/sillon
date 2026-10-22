@@ -2,7 +2,7 @@
 // - Le Client ID Spotify est public par nature (flux PKCE, pas de secret client).
 // - Le jeton GitHub n'est JAMAIS dans le code : il est saisi dans Réglages et reste dans le navigateur.
 export const CONFIG = {
-  spotifyClientId: "",
+  spotifyClientId: "3daf8f0c67b64b4ea85431def38af8f4",
   dataRepo: { owner: "Dod8431", repo: "sillon-data", branch: "main" },
   // Remplacé en dev par un faux GitHub local (voir scripts/dev-github.js).
   apiBase: import.meta.env.VITE_GH_API || "https://api.github.com",
