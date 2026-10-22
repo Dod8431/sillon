@@ -1,6 +1,6 @@
 import {
   h, useState, useEffect, useRef, useMemo, useCallback, Ctx,
-  LS, G, VIEWS, DEFAULT_SESSION, catNo, slug, isRated, inPlaylist, sessionOf, batchNum, normalizeDoc, initialView,
+  LS, G, VIEWS, DEFAULT_SESSION, catNo, slug, isRated, inPlaylist, sessionOf, batchNum, normalizeDoc, initialView, registerGenres,
 } from "./core.js";
 import { Disc, reduceMotion } from "./components.js";
 import { ViewDecouvrir, ViewPlaylist, ViewArchives, ViewStats, ViewCompositions } from "./views.js";
@@ -18,6 +18,7 @@ const RATING = id => "data/ratings/" + id + ".json";
 const SESSION = id => "data/sessions/" + id + ".json";
 const REQUEST = id => "data/requests/" + id + ".json";
 const TAGS = "data/meta/tags.json";
+const GENRES_FILE = "data/meta/genres.json";
 const baseName = p => p.replace(/^.*\//, "").replace(/\.json$/, "");
 const isObj = v => v && typeof v === "object" && !Array.isArray(v);
 
@@ -33,7 +34,15 @@ function serializeDoc(d) {
   return body;
 }
 
+let lastGenres = null;
 function derive(sync) {
+  // Genres définis dans le dépôt : appliqués avant tout rendu.
+  const gf = sync.get(GENRES_FILE);
+  if (gf !== lastGenres) {
+    lastGenres = gf;
+    const ignored = registerGenres(gf);
+    if (ignored.length) console.warn("[genres] entrées ignorées dans " + GENRES_FILE + " :", ignored);
+  }
   const docs = {}, sessions = {}, requests = {};
   sync.list("data/ratings/").forEach(r => { if (isObj(r.data) && r.data.song && r.data.artist) docs[baseName(r.path)] = normalizeDoc(r.data); });
   sync.list("data/sessions/").forEach(r => { if (isObj(r.data)) sessions[baseName(r.path)] = r.data; });

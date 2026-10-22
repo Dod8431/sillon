@@ -2,7 +2,7 @@ import { stableStringify, deepEqual, gitBlobSha } from "../lib/json.js";
 import { merge3 } from "./merge.js";
 
 // Fichiers du dépôt suivis par l'app.
-export const TRACKED = /^data\/(ratings|sessions|requests)\/[^/]+\.json$|^data\/meta\/tags\.json$/;
+export const TRACKED = /^data\/(ratings|sessions|requests)\/[^/]+\.json$|^data\/meta\/(tags|genres)\.json$/;
 
 const clone = v => v === undefined ? undefined : JSON.parse(JSON.stringify(v));
 const idOf = path => path.replace(/^.*\//, "").replace(/\.json$/, "");

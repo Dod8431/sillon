@@ -45,6 +45,39 @@ export const ALL_QUALS = uniq(Object.values(GENRES).flatMap(g => g.sections.flat
 export const FLAGS = uniq(Object.values(GENRES).flatMap(g => g.flags));
 export const NEW_TAGS = new Set();
 export const G = g => GENRES[g] || GENRES.autre;
+
+/* Genres ajoutés depuis le dépôt (data/meta/genres.json), par-dessus les six genres intégrés.
+   Format : { "genres": { "metal": { "label": "Metal", "sections": [{ "name": "Son", "tags": [["riff", "Riff"], …] }], "flags": [["cris", "Cris de trop"]] } } }
+   Règles : un genre intégré n'est pas remplacé ; les identifiants sont en a-z0-9- ;
+   un identifiant déjà utilisé comme défaut ne peut pas devenir un mot-clé +/− (et inversement). */
+const BUILTIN_GENRES = Object.keys(GENRES);
+const ID_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
+const asPair = t => Array.isArray(t) ? [t[0], t[1]] : t && typeof t === "object" ? [t.id, t.label] : [null, null];
+export function registerGenres(file) {
+  const ignored = [];
+  Object.keys(GENRES).forEach(k => { if (!BUILTIN_GENRES.includes(k)) delete GENRES[k]; });
+  const quals = new Set(), flags = new Set();
+  BUILTIN_GENRES.forEach(k => { GENRES[k].sections.forEach(s => s.tags.forEach(t => quals.add(t[0]))); GENRES[k].flags.forEach(f => flags.add(f[0])); });
+  const clean = (list, isFlagList, where) => (Array.isArray(list) ? list : []).map(asPair).filter(([id, label]) => {
+    const ok = typeof id === "string" && ID_RE.test(id) && typeof label === "string" && label.trim() && !(isFlagList ? quals.has(id) : flags.has(id));
+    if (!ok) ignored.push(where + " : " + JSON.stringify([id, label]));
+    return ok;
+  }).map(([id, label]) => [id, label.trim().slice(0, 40)]);
+  const src = file && typeof file === "object" && file.genres && typeof file.genres === "object" ? file.genres : {};
+  Object.entries(src).forEach(([key, g]) => {
+    if (BUILTIN_GENRES.includes(key) || !ID_RE.test(key) || !g || typeof g !== "object") { ignored.push("genre " + key); return; }
+    const sections = (Array.isArray(g.sections) ? g.sections : []).map((s, i) => ({ name: String((s && s.name) || "Section " + (i + 1)).slice(0, 40), tags: clean(s && s.tags, false, key) })).filter(s => s.tags.length);
+    const fl = clean(g.flags, true, key + " (défauts)");
+    if (!sections.length && !fl.length) { ignored.push("genre " + key + " (vide)"); return; }
+    sections.forEach(s => s.tags.forEach(t => quals.add(t[0])));
+    fl.forEach(f => flags.add(f[0]));
+    GENRES[key] = { label: String(g.label || key).slice(0, 30), sections, flags: fl, custom: true };
+  });
+  // Mise à jour en place : les autres modules gardent la même référence.
+  ALL_QUALS.splice(0, ALL_QUALS.length, ...uniq(Object.values(GENRES).flatMap(g => g.sections.flatMap(s => s.tags))));
+  FLAGS.splice(0, FLAGS.length, ...uniq(Object.values(GENRES).flatMap(g => g.flags)));
+  return ignored;
+}
 export const CONTEXTS = ["", "Voiture", "Sport", "Concentration", "Soirée", "Réveil", "À faire découvrir"];
 export const DIRECTIONS = [["folie","Plus de folie"],["energie","Plus d'énergie"],["lourd","Plus lourd / plus sombre"],["outro","Grosse fin"],["recent","Plus récent"],["obscur","Moins connu"],["court","Moins de 4 min"],["autre","Autre scène / pays"]];
 export const LEGACY = {
